@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Honest Cattle — County Land Map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>
+  html,body{margin:0;height:100%;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#2C2C2C}
+  #map{position:absolute;inset:0}
+  .hc-title{position:absolute;top:12px;left:12px;z-index:1000;background:rgba(254,252,249,.95);
+    border:1px solid #D4C9B8;border-radius:12px;padding:10px 14px;box-shadow:0 6px 20px rgba(0,0,0,.12);max-width:min(78vw,360px)}
+  .hc-title .eyebrow{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:#8a5a2b;font-weight:800}
+  .hc-title h1{font-family:Georgia,serif;font-size:19px;margin:2px 0 0;font-weight:700;color:#2C2C2C}
+  .hc-title p{margin:4px 0 0;font-size:12px;color:#6b6559;line-height:1.35}
+  .leaflet-control.hc-legend{background:rgba(254,252,249,.96);border:1px solid #D4C9B8;border-radius:10px;
+    padding:9px 11px;box-shadow:0 4px 14px rgba(0,0,0,.1);font-size:12px;line-height:1.5;max-width:210px}
+  .hc-legend b{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:#4a5e3a;margin:0 0 4px}
+  .hc-legend .row{display:flex;align-items:center;gap:7px;margin:2px 0}
+  .hc-legend .sw{width:14px;height:12px;border-radius:2px;flex:none;border:1px solid rgba(0,0,0,.25)}
+  .hc-legend .muted{color:#6b6559;font-size:11px;margin-top:6px}
+  .leaflet-control-layers{border-radius:10px!important;border:1px solid #D4C9B8!important}
+  a.hc-back{position:absolute;bottom:12px;left:12px;z-index:1000;background:#4a5e3a;color:#fff;text-decoration:none;
+    font-size:12px;font-weight:700;padding:8px 12px;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.15)}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="hc-title">
+  <div class="eyebrow">Honest Cattle · Rancher's GIS</div>
+  <h1 id="hc-county">Montana</h1>
+  <p>Land, water and ownership for the county — every layer drawn live from its official Montana source. Toggle layers at top-right.</p>
+</div>
+<a class="hc-back" id="hc-back" href="https://honestcattle.net/">← County page</a>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/esri-leaflet@3.0.12/dist/esri-leaflet.js"></script>
+<script>
+(function(){
+  var q = new URLSearchParams(location.search);
+  var fips = (q.get('fips')||'').replace(/[^0-9]/g,'');      // 5-digit county FIPS, e.g. 30111
+  var name = q.get('name') || 'Montana';
+  var slug = q.get('slug') || '';
+  document.getElementById('hc-county').textContent = name + (name==='Montana'?'':' County');
+  if (slug) document.getElementById('hc-back').href =
+     'https://honestcattle.net/counties-in-montana-counties/'+slug+(['big-horn','carbon','lewis-and-clark','gallatin'].indexOf(slug)>=0?'-county':'-county-montana')+'/';
+
+  var MSDI = 'https://gisservicemt.gov/arcgis/rest/services/MSDI_Framework/';
+  var DNRC = 'https://gis.dnrc.mt.gov/arcgis/rest/services/WRD/';
+
+  var map = L.map('map', {center:[46.9,-110], zoom:7, zoomControl:true});
+  L.esri.basemapLayer('Imagery').addTo(map);
+  L.esri.basemapLayer('ImageryLabels').addTo(map);
+
+  // --- overlays (all live MT services) ---
+  var landcover = L.esri.dynamicMapLayer({url: MSDI+'MontanaLandCover/MapServer', opacity:0.55});
+  var irrigation = L.esri.dynamicMapLayer({url: DNRC+'MontanaStatewideIrrigation/MapServer', opacity:0.8});
+  var publiclands = L.esri.dynamicMapLayer({url: MSDI+'PublicLands/MapServer', opacity:0.5});
+  var parcels = L.esri.dynamicMapLayer({url: MSDI+'Parcels/MapServer', opacity:0.85, minZoom:12});
+
+  landcover.addTo(map); irrigation.addTo(map);
+
+  var overlays = {
+    '<span style="color:#3a6b2a">🌾 Land cover</span> <span style="color:#888;font-size:11px">(crops · range · forest)</span>': landcover,
+    '<span style="color:#1f6f9e">💧 Irrigated fields</span> <span style="color:#888;font-size:11px">(DNRC)</span>': irrigation,
+    '<span style="color:#7a5a2b">🏛 Public lands</span> <span style="color:#888;font-size:11px">(federal · state · tribal)</span>': publiclands,
+    '<span style="color:#555">▦ Ownership parcels</span> <span style="color:#888;font-size:11px">(zoom in)</span>': parcels
+  };
+  L.control.layers({}, overlays, {collapsed:false, position:'topright'}).addTo(map);
+
+  // --- county outline + zoom-to ---
+  var where = fips ? ("FIPS='"+fips.slice(-3)+"' AND ALLFIPS='"+fips+"'") : '1=0';
+  var county = L.esri.featureLayer({
+    url: MSDI+'Boundaries/MapServer/8', where: where,
+    style: function(){ return {color:'#8B0000', weight:3, fill:false, dashArray:'4 3'}; }
+  }).addTo(map);
+  county.once('load', function(){
+    try { var b = county.getBounds(); if (b.isValid()) map.fitBounds(b, {padding:[30,30]}); } catch(e){}
+  });
+
+  // --- legend ---
+  var legend = L.control({position:'bottomright'});
+  legend.onAdd = function(){
+    var d = L.DomUtil.create('div','leaflet-control hc-legend');
+    d.innerHTML =
+      '<b>Land cover</b>'+
+      '<div class="row"><span class="sw" style="background:#e8d98a"></span>Crops &amp; hay</div>'+
+      '<div class="row"><span class="sw" style="background:#c7d6a0"></span>Grass &amp; range</div>'+
+      '<div class="row"><span class="sw" style="background:#7fa06b"></span>Forest</div>'+
+      '<div class="row"><span class="sw" style="background:#3a8fd0"></span>Irrigated field</div>'+
+      '<div class="row"><span class="sw" style="background:#c9a25a"></span>Public land</div>'+
+      '<div class="muted">Sources: Montana State Library (land cover, parcels, public lands); Montana DNRC (irrigation). Layers render live from each agency.</div>';
+    return d;
+  };
+  legend.addTo(map);
+})();
+</script>
+</body>
+</html>
