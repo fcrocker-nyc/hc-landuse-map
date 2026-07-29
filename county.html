@@ -69,14 +69,21 @@
   L.control.layers({}, overlays, {collapsed:false, position:'topright'}).addTo(map);
 
   // --- county outline + zoom-to ---
-  var where = fips ? ("FIPS='"+fips.slice(-3)+"' AND ALLFIPS='"+fips+"'") : '1=0';
+  var where = fips ? ("ALLFIPS='"+fips+"'") : '1=0';
   var county = L.esri.featureLayer({
     url: MSDI+'Boundaries/MapServer/8', where: where,
     style: function(){ return {color:'#8B0000', weight:3, fill:false, dashArray:'4 3'}; }
   }).addTo(map);
-  county.once('load', function(){
-    try { var b = county.getBounds(); if (b.isValid()) map.fitBounds(b, {padding:[30,30]}); } catch(e){}
-  });
+  // Deterministic zoom: fetch the county extent (WGS84) and fit to it.
+  if (fips) {
+    var qs = 'where='+encodeURIComponent("ALLFIPS='"+fips+"'")+'&returnExtentOnly=true&outSR=4326&f=json';
+    fetch(MSDI+'Boundaries/MapServer/8/query?'+qs)
+      .then(function(r){return r.json();})
+      .then(function(d){
+        var e = d && d.extent;
+        if (e && isFinite(e.xmin)) map.fitBounds([[e.ymin,e.xmin],[e.ymax,e.xmax]], {padding:[24,24]});
+      }).catch(function(){});
+  }
 
   // --- legend ---
   var legend = L.control({position:'bottomright'});
