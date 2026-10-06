@@ -14,7 +14,7 @@
   .hc-title h1{font-family:Georgia,serif;font-size:19px;margin:2px 0 0;font-weight:700;color:#2C2C2C}
   .hc-title p{margin:4px 0 0;font-size:12px;color:#6b6559;line-height:1.35}
   .leaflet-control.hc-legend{background:rgba(254,252,249,.96);border:1px solid #D4C9B8;border-radius:10px;
-    padding:9px 11px;box-shadow:0 4px 14px rgba(0,0,0,.1);font-size:12px;line-height:1.5;max-width:210px}
+    padding:9px 11px;box-shadow:0 4px 14px rgba(0,0,0,.1);font-size:12px;line-height:1.5;max-width:220px}
   .hc-legend b{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:#4a5e3a;margin:0 0 4px}
   .hc-legend .row{display:flex;align-items:center;gap:7px;margin:2px 0}
   .hc-legend .sw{width:14px;height:12px;border-radius:2px;flex:none;border:1px solid rgba(0,0,0,.25)}
@@ -22,6 +22,8 @@
   .leaflet-control-layers{border-radius:10px!important;border:1px solid #D4C9B8!important}
   a.hc-back{position:absolute;bottom:12px;left:12px;z-index:1000;background:#4a5e3a;color:#fff;text-decoration:none;
     font-size:12px;font-weight:700;padding:8px 12px;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.15)}
+  .hc-filtered{position:absolute;pointer-events:none;opacity:.62}
+  .leaflet-zoom-anim .hc-filtered{visibility:hidden}
 </style>
 </head>
 <body>
@@ -29,7 +31,7 @@
 <div class="hc-title">
   <div class="eyebrow">Honest Cattle · Rancher's GIS</div>
   <h1 id="hc-county">Montana</h1>
-  <p>Land, water and ownership for the county — every layer drawn live from its official Montana source. Toggle layers at top-right.</p>
+  <p>Land, water and ownership for the county — every layer drawn live from its official Montana source. Toggle layers at top-right; choose <b>“forest hidden”</b> to see only farm, hay and range ground.</p>
 </div>
 <a class="hc-back" id="hc-back" href="https://honestcattle.net/">← County page</a>
 
@@ -38,46 +40,169 @@
 <script>
 (function(){
   var q = new URLSearchParams(location.search);
-  var fips = (q.get('fips')||'').replace(/[^0-9]/g,'');      // 5-digit county FIPS, e.g. 30111
+  var fips = (q.get('fips')||'').replace(/[^0-9]/g,'');      // 5-digit county FIPS, e.g. 30067
   var name = q.get('name') || 'Montana';
   var slug = q.get('slug') || '';
   document.getElementById('hc-county').textContent = name + (name==='Montana'?'':' County');
   if (slug) document.getElementById('hc-back').href =
-     'https://honestcattle.net/counties-in-montana-counties/'+slug+(['big-horn','carbon','lewis-and-clark','gallatin'].indexOf(slug)>=0?'-county':'-county-montana')+'/';
+    'https://honestcattle.net/counties-in-montana-counties/'+slug+(['big-horn','carbon','lewis-and-clark','gallatin'].indexOf(slug)>=0?'-county':'-county-montana')+'/';
 
-  var MSDI = 'https://gisservicemt.gov/arcgis/rest/services/MSDI_Framework/';
+  // Montana State Library moved its services from gisservicemt.gov to gisservice.mt.gov
+  // (2026) and renamed them. Old: MSDI_Framework/<Name>/MapServer. New: msdi_*_map_v1.
+  var MSL  = 'https://gisservice.mt.gov/arcgis/rest/services/';
+  var LANDCOVER = MSL+'msdi_land_cover_map_v1/MapServer';
+  var CADASTRAL = MSL+'msdi_cadastral_map_v1/MapServer';            // 0 easements, 1 parcels, 2 public lands
+  var COUNTY    = MSL+'msdi_administrative_boundaries_map_v1/MapServer/8';
   var DNRC = 'https://gis.dnrc.mt.gov/arcgis/rest/services/WRD/';
 
   var map = L.map('map', {center:[46.9,-110], zoom:7, zoomControl:true});
   L.esri.basemapLayer('Imagery').addTo(map);
   L.esri.basemapLayer('ImageryLabels').addTo(map);
 
-  // --- overlays (all live MT services) ---
-  var landcover = L.esri.dynamicMapLayer({url: MSDI+'MontanaLandCover/MapServer', opacity:0.55});
+  // --- land cover, all classes (server-drawn) ---
+  var landcover = L.esri.dynamicMapLayer({url: LANDCOVER, opacity:0.55});
+
+  // --- land cover with forest removed ---
+  // The state raster cannot be re-styled on the server (it ignores dynamic renderers),
+  // so the browser removes forest pixels itself. The service draws one of three levels
+  // depending on scale (Level 1 above 1:2,000,000, Level 2 down to 1:200,000, Level 3
+  // below). Each drawn colour is matched to the NEAREST legend colour of the level being
+  // drawn — the drawn image is colour-shifted by up to ~20 RGB units from the legend
+  // swatches, and some Level 3 forest colours equal Level 2 grassland colours, so exact
+  // or cross-level matching would be wrong. The palette is read live from the service
+  // legend, so the filter follows any future change to the state's colours.
+  var FOREST_L2 = ['Deciduous Forest and Woodland','Harvested Forest','Insect-Killed Forest',
+    'Low Elevation - Xeric Forest and Woodland','Montane - Subalpine Forest and Woodland','Riparian and Wetland Forest'];
+  // word-anchored: "pine" must not match inside "Subalpine"/"Alpine" (tested 2026-10-06)
+  var FOREST_L3 = /\bforest|\bwoodland|\bpine\b|spruce|douglas-fir|hemlock|\baspen\b|recently logged|insect\/disease/i;
+  var NOT_FOREST_L3 = /shrubland|mahogany|introduced/i;
+  function isForest(level, label){
+    if (level===0) return label==='Forest and Woodland';
+    if (level===1) return FOREST_L2.indexOf(label)>=0;
+    return FOREST_L3.test(label) && !NOT_FOREST_L3.test(label);
+  }
+  var palette = null;   // {0:[{rgb:[r,g,b], forest:bool, label}], 1:[...], 2:[...]}
+  function loadPalette(){
+    if (palette) return Promise.resolve(palette);
+    return fetch(LANDCOVER+'/legend?f=json').then(function(r){return r.json();}).then(function(lg){
+      var pal = {}, jobs = [];
+      (lg.layers||[]).forEach(function(l){
+        pal[l.layerId] = [];
+        l.legend.forEach(function(e){
+          jobs.push(new Promise(function(res){
+            var img = new Image();
+            img.onload = function(){
+              var c = document.createElement('canvas'); c.width=img.width; c.height=img.height;
+              var x = c.getContext('2d'); x.drawImage(img,0,0);
+              var d = x.getImageData(Math.floor(img.width/2), Math.floor(img.height/2), 1, 1).data;
+              // The service draws map images about 11% more contrasty than its legend
+              // swatches: drawn = 1.11 x legend - 14.3 on every channel (fitted 2026-10-06;
+              // residual error under 2 RGB units at all three levels). Apply it so the
+              // nearest-colour match is exact.
+              var adj = function(v){ return Math.max(0, Math.min(255, Math.round(1.11*v - 14.3))); };
+              pal[l.layerId].push({rgb:[adj(d[0]),adj(d[1]),adj(d[2])], forest:isForest(l.layerId, e.label), label:e.label});
+              res();
+            };
+            img.onerror = function(){ res(); };
+            img.src = 'data:'+e.contentType+';base64,'+e.imageData;
+          }));
+        });
+      });
+      return Promise.all(jobs).then(function(){ palette = pal; return pal; });
+    });
+  }
+  function nearestIsForest(entries, r, g, b){
+    var best = null, bd = Infinity;
+    for (var i=0;i<entries.length;i++){
+      var p = entries[i].rgb, dd = (p[0]-r)*(p[0]-r)+(p[1]-g)*(p[1]-g)+(p[2]-b)*(p[2]-b);
+      if (dd < bd){ bd = dd; best = entries[i]; }
+    }
+    // a colour far from every legend entry is never hidden — if the state changes its
+    // palette, the map shows too much rather than silently dropping farmland
+    return !!(best && best.forest && bd <= 100);
+  }
+
+  var NoForest = L.Layer.extend({
+    onAdd: function(m){
+      this._map = m;
+      this._canvas = L.DomUtil.create('canvas','hc-filtered');
+      m.getPanes().overlayPane.appendChild(this._canvas);
+      m.on('moveend', this._update, this);
+      this._update();
+    },
+    onRemove: function(m){
+      m.off('moveend', this._update, this);
+      L.DomUtil.remove(this._canvas);
+      this._seq = (this._seq||0)+1;
+    },
+    _update: function(){
+      var m = this._map, me = this, seq = this._seq = (this._seq||0)+1;
+      var size = m.getSize(), b = m.getBounds();
+      var sw = L.CRS.EPSG3857.project(b.getSouthWest()), ne = L.CRS.EPSG3857.project(b.getNorthEast());
+      var url = LANDCOVER+'/export?bbox='+[sw.x,sw.y,ne.x,ne.y].join(',')+'&bboxSR=3857&imageSR=3857'+
+        '&size='+size.x+','+size.y+'&dpi=96&format=png32&transparent=true&f=image';
+      var topLeft = m.containerPointToLayerPoint([0,0]);
+      // the scale the server uses to pick a level: map units per pixel at 96 dpi
+      var scale = (ne.x - sw.x) / size.x * 96 / 0.0254;
+      var level = scale > 2000000 ? 0 : (scale > 200000 ? 1 : 2);
+      loadPalette().then(function(pal){
+        var entries = pal[level] || [];
+        return fetch(url).then(function(r){ return r.blob(); }).then(function(blob){ return createImageBitmap(blob); })
+          .then(function(bmp){
+            if (seq !== me._seq) return;                       // a newer view has been requested
+            var c = me._canvas; c.width = bmp.width; c.height = bmp.height;
+            c.style.width = size.x+'px'; c.style.height = size.y+'px';
+            var x = c.getContext('2d'); x.drawImage(bmp,0,0);
+            var img = x.getImageData(0,0,c.width,c.height), d = img.data, memo = {}, hidden = 0, shown = 0;
+            for (var i=0;i<d.length;i+=4){
+              if (!d[i+3]) continue;
+              var k = (d[i]<<16)|(d[i+1]<<8)|d[i+2];
+              var f = memo[k]; if (f === undefined) f = memo[k] = nearestIsForest(entries, d[i], d[i+1], d[i+2]);
+              if (f) { d[i+3] = 0; hidden++; } else shown++;
+            }
+            x.putImageData(img,0,0);
+            L.DomUtil.setPosition(c, topLeft);
+            window.HC_LAST = {level: level, hidden: hidden, shown: shown};
+          });
+      }).catch(function(e){ window.HC_LAST_ERROR = String(e); });
+    }
+  });
+  var landcoverNoForest = new NoForest();
+
   var irrigation = L.esri.dynamicMapLayer({url: DNRC+'MontanaStatewideIrrigation/MapServer', opacity:0.8});
-  var publiclands = L.esri.dynamicMapLayer({url: MSDI+'PublicLands/MapServer', opacity:0.5});
-  var parcels = L.esri.dynamicMapLayer({url: MSDI+'Parcels/MapServer', opacity:0.85, minZoom:12});
+  var publiclands = L.esri.dynamicMapLayer({url: CADASTRAL, layers:[2], opacity:0.5});
+  var parcels = L.esri.dynamicMapLayer({url: CADASTRAL, layers:[1], opacity:0.85, minZoom:12});
 
-  landcover.addTo(map); irrigation.addTo(map);
+  var startNoForest = /^(1|true|yes)$/i.test(q.get('noforest')||'');
+  (startNoForest ? landcoverNoForest : landcover).addTo(map);
+  irrigation.addTo(map);
 
-  var overlays = {
-    '<span style="color:#3a6b2a">🌾 Land cover</span> <span style="color:#888;font-size:11px">(crops · range · forest)</span>': landcover,
-    '<span style="color:#1f6f9e">💧 Irrigated fields</span> <span style="color:#888;font-size:11px">(DNRC)</span>': irrigation,
-    '<span style="color:#7a5a2b">🏛 Public lands</span> <span style="color:#888;font-size:11px">(federal · state · tribal)</span>': publiclands,
-    '<span style="color:#555">▦ Ownership parcels</span> <span style="color:#888;font-size:11px">(zoom in)</span>': parcels
-  };
-  L.control.layers({}, overlays, {collapsed:false, position:'topright'}).addTo(map);
+  var LC_ALL = '<span style="color:#3a6b2a">🌾 Land cover</span> <span style="color:#888;font-size:11px">(crops · range · forest)</span>';
+  var LC_NOF = '<span style="color:#8a6d0b">🌾 Land cover, forest hidden</span> <span style="color:#888;font-size:11px">(farm · hay · range only)</span>';
+  var overlays = {};
+  overlays[LC_ALL] = landcover;
+  overlays[LC_NOF] = landcoverNoForest;
+  overlays['<span style="color:#1f6f9e">💧 Irrigated fields</span> <span style="color:#888;font-size:11px">(DNRC)</span>'] = irrigation;
+  overlays['<span style="color:#7a5a2b">🏛 Public lands</span> <span style="color:#888;font-size:11px">(federal · state · tribal)</span>'] = publiclands;
+  overlays['<span style="color:#555">▦ Ownership parcels</span> <span style="color:#888;font-size:11px">(zoom in)</span>'] = parcels;
+  var ctl = L.control.layers({}, overlays, {collapsed:false, position:'topright'}).addTo(map);
+
+  // the two land-cover views are alternatives: turning one on turns the other off
+  map.on('overlayadd', function(e){
+    if (e.layer === landcover && map.hasLayer(landcoverNoForest)) map.removeLayer(landcoverNoForest);
+    if (e.layer === landcoverNoForest && map.hasLayer(landcover)) map.removeLayer(landcover);
+    ctl._update && ctl._update();
+  });
 
   // --- county outline + zoom-to ---
   var where = fips ? ("ALLFIPS='"+fips+"'") : '1=0';
-  var county = L.esri.featureLayer({
-    url: MSDI+'Boundaries/MapServer/8', where: where,
+  L.esri.featureLayer({
+    url: COUNTY, where: where,
     style: function(){ return {color:'#8B0000', weight:3, fill:false, dashArray:'4 3'}; }
   }).addTo(map);
-  // Deterministic zoom: fetch the county extent (WGS84) and fit to it.
   if (fips) {
     var qs = 'where='+encodeURIComponent("ALLFIPS='"+fips+"'")+'&returnExtentOnly=true&outSR=4326&f=json';
-    fetch(MSDI+'Boundaries/MapServer/8/query?'+qs)
+    fetch(COUNTY+'/query?'+qs)
       .then(function(r){return r.json();})
       .then(function(d){
         var e = d && d.extent;
@@ -91,15 +216,17 @@
     var d = L.DomUtil.create('div','leaflet-control hc-legend');
     d.innerHTML =
       '<b>Land cover</b>'+
-      '<div class="row"><span class="sw" style="background:#e8d98a"></span>Crops &amp; hay</div>'+
-      '<div class="row"><span class="sw" style="background:#c7d6a0"></span>Grass &amp; range</div>'+
-      '<div class="row"><span class="sw" style="background:#7fa06b"></span>Forest</div>'+
+      '<div class="row"><span class="sw" style="background:#ffda28"></span>Crops &amp; hay</div>'+
+      '<div class="row"><span class="sw" style="background:#d0ec9b"></span>Grass &amp; range</div>'+
+      '<div class="row"><span class="sw" style="background:#fef1b4"></span>Sagebrush &amp; shrub</div>'+
+      '<div class="row"><span class="sw" style="background:#4c702f"></span>Forest <span style="color:#6b6559">(hidden in “forest hidden”)</span></div>'+
       '<div class="row"><span class="sw" style="background:#3a8fd0"></span>Irrigated field</div>'+
       '<div class="row"><span class="sw" style="background:#c9a25a"></span>Public land</div>'+
-      '<div class="muted">Sources: Montana State Library (land cover, parcels, public lands); Montana DNRC (irrigation). Layers render live from each agency.</div>';
+      '<div class="muted">Sources: Montana State Library 2023 Montana Land Cover, parcels and public lands; Montana DNRC irrigation. Layers render live from each agency.</div>';
     return d;
   };
   legend.addTo(map);
+  window.HC_MAP = map;
 })();
 </script>
 </body>
